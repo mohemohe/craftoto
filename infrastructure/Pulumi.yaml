@@ -1,0 +1,47 @@
+name: craftoto-infrastructure
+runtime: nodejs
+description: Craftoto Discord Bot Cloud Run infrastructure
+
+config:
+  gcp:project:
+    description: Google Cloud Project ID
+  gcp:region:
+    description: GCP region for resources
+    default: asia-northeast1
+  
+  craftoto:discord-public-key:
+    description: Discord public key for webhook verification
+    secret: true
+  craftoto:discord-token:
+    description: Discord bot token
+    secret: true
+  craftoto:discord-application-id:
+    description: Discord application ID
+    secret: true
+  craftoto:discord-guild-id:
+    description: Discord guild ID
+    secret: true
+  
+  craftoto:minecraft-host:
+    description: Minecraft server host
+  craftoto:minecraft-rcon-port:
+    description: Minecraft RCON port
+    default: "25575"
+  craftoto:minecraft-rcon-password:
+    description: Minecraft RCON password
+    secret: true
+    
+  craftoto:gcp-project-id:
+    description: GCP project ID for managed instances
+  craftoto:gcp-zone:
+    description: GCP zone for managed instances
+    default: asia-northeast1-a
+  craftoto:gcp-instance-name:
+    description: GCP instance name to manage
+    
+  craftoto:idle-timeout-minutes:
+    description: Idle timeout in minutes
+    default: "15"
+  craftoto:check-interval-seconds:
+    description: Check interval in seconds
+    default: "60"

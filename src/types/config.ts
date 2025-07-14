@@ -2,6 +2,8 @@ export interface Config {
   discord: {
     token: string;
     guildId: string;
+    publicKey: string;
+    applicationId: string;
   };
   gcp: {
     projectId: string;

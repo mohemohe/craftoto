@@ -1,4 +1,5 @@
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+import express from 'express';
+import { verifyKeyMiddleware, InteractionType, InteractionResponseType } from 'discord-interactions';
 import { loadConfig } from './utils/config';
 import { logger } from './utils/logger';
 import { GCPService } from './services/gcp.service';
@@ -6,102 +7,193 @@ import { MinecraftService } from './services/minecraft.service';
 import { MonitoringService } from './services/monitoring.service';
 
 const config = loadConfig();
-
-// Discord Bot クライアントを作成
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // サービスクラスのインスタンス化
 const gcpService = new GCPService(config.gcp);
 const minecraftService = new MinecraftService(config.minecraft);
 const monitoringService = new MonitoringService(config.monitoring, gcpService, minecraftService);
 
-// スラッシュコマンドの定義
-const commands = [
-  new SlashCommandBuilder()
-    .setName('up')
-    .setDescription('GCPインスタンスを起動します'),
-  
-  new SlashCommandBuilder()
-    .setName('down')
-    .setDescription('ワールドを保存してGCPインスタンスをシャットダウンします'),
-  
-  new SlashCommandBuilder()
-    .setName('status')
-    .setDescription('サーバーの状態を確認します'),
-].map(command => command.toJSON());
+// Discord署名検証ミドルウェア
+app.use('/interactions', verifyKeyMiddleware(config.discord.publicKey));
 
-// コマンドをDiscordに登録
-async function deployCommands() {
+// JSON解析
+app.use(express.json());
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+// Discord Interactions Webhook endpoint
+app.post('/interactions', async (req, res) => {
+  const { type, data } = req.body;
+
+  // PINGリクエストの処理
+  if (type === InteractionType.PING) {
+    return res.send({ type: InteractionResponseType.PONG });
+  }
+
+  // スラッシュコマンドの処理
+  if (type === InteractionType.APPLICATION_COMMAND) {
+    const { name, options } = data;
+
+    try {
+      if (name === 'craftoto') {
+        // サブコマンドを取得
+        const subcommand = options?.[0];
+        if (!subcommand) {
+          // サブコマンドが指定されていない場合はhelpを表示
+          return res.send({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              embeds: [createHelpEmbed()],
+            },
+          });
+        }
+
+        switch (subcommand.name) {
+          case 'up':
+            // Deferredレスポンスを返す
+            res.send({
+              type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            });
+            
+            // 非同期でコマンドを実行
+            handleUpCommand(req.body.token);
+            break;
+
+          case 'down':
+            res.send({
+              type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            });
+            
+            handleDownCommand(req.body.token);
+            break;
+
+          case 'status':
+            res.send({
+              type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+            });
+            
+            handleStatusCommand(req.body.token);
+            break;
+
+          case 'help':
+            return res.send({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                embeds: [createHelpEmbed()],
+              },
+            });
+
+          default:
+            return res.send({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                content: '❌ 未知のサブコマンドです。',
+                embeds: [createHelpEmbed()],
+              },
+            });
+        }
+      } else {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: '❌ 未知のコマンドです。',
+          },
+        });
+      }
+    } catch (error) {
+      logger.error('コマンド処理エラー:', error);
+      return res.send({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          content: '❌ エラーが発生しました。',
+        },
+      });
+    }
+  }
+});
+
+// 監視エンドポイント（Cloud Scheduler用）
+app.post('/monitor', async (req, res) => {
   try {
-    const rest = new REST({ version: '10' }).setToken(config.discord.token);
-    
-    logger.info('スラッシュコマンドを登録中...');
-    
-    await rest.put(
-      Routes.applicationGuildCommands(client.user!.id, config.discord.guildId),
-      { body: commands },
-    );
-    
-    logger.info('スラッシュコマンドの登録が完了しました。');
+    // プレイヤー監視を実行
+    await monitoringService.checkAndShutdownIfIdle();
+    res.json({ success: true, message: '監視処理が完了しました' });
   } catch (error) {
-    logger.error('コマンド登録エラー:', error);
+    logger.error('監視処理エラー:', error);
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : '不明なエラー' });
+  }
+});
+
+// コマンドハンドラー関数
+async function handleUpCommand(token: string) {
+  try {
+    const startResult = await gcpService.startInstance();
+    await sendFollowupMessage(token, `✅ インスタンス起動を開始しました: ${startResult}`);
+  } catch (error) {
+    logger.error('Up コマンドエラー:', error);
+    const errorMessage = error instanceof Error ? error.message : '不明なエラーが発生しました。';
+    await sendFollowupMessage(token, `❌ エラー: ${errorMessage}`);
   }
 }
 
-// Bot Ready イベント
-client.once('ready', async () => {
-  logger.info(`${client.user?.tag} としてログインしました。`);
-  await deployCommands();
-  
-  // 監視サービスを開始
-  monitoringService.startMonitoring();
-});
-
-// スラッシュコマンドの処理
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const { commandName } = interaction;
-
+async function handleDownCommand(token: string) {
   try {
-    switch (commandName) {
-      case 'up':
-        await interaction.deferReply();
-        const startResult = await gcpService.startInstance();
-        await interaction.editReply(`✅ インスタンス起動を開始しました: ${startResult}`);
-        break;
+    // ワールド保存してからシャットダウン
+    await minecraftService.saveWorld();
+    const stopResult = await gcpService.stopInstance();
+    await sendFollowupMessage(token, `✅ ワールドを保存してインスタンスをシャットダウンしました: ${stopResult}`);
+  } catch (error) {
+    logger.error('Down コマンドエラー:', error);
+    const errorMessage = error instanceof Error ? error.message : '不明なエラーが発生しました。';
+    await sendFollowupMessage(token, `❌ エラー: ${errorMessage}`);
+  }
+}
 
-      case 'down':
-        await interaction.deferReply();
-        // ワールド保存してからシャットダウン
-        await minecraftService.saveWorld();
-        const stopResult = await gcpService.stopInstance();
-        await interaction.editReply(`✅ ワールドを保存してインスタンスをシャットダウンしました: ${stopResult}`);
-        break;
+async function handleStatusCommand(token: string) {
+  try {
+    const status = await getServerStatus();
+    const embed = createStatusEmbed(status);
+    await sendFollowupMessage(token, '', [embed]);
+  } catch (error) {
+    logger.error('Status コマンドエラー:', error);
+    const errorMessage = error instanceof Error ? error.message : '不明なエラーが発生しました。';
+    await sendFollowupMessage(token, `❌ エラー: ${errorMessage}`);
+  }
+}
 
-      case 'status':
-        await interaction.deferReply();
-        const status = await getServerStatus();
-        const embed = createStatusEmbed(status);
-        await interaction.editReply({ embeds: [embed] });
-        break;
-
-      default:
-        await interaction.reply('未知のコマンドです。');
+// Discord Followup Message送信
+async function sendFollowupMessage(token: string, content: string, embeds?: any[]) {
+  const webhook_url = `https://discord.com/api/webhooks/${config.discord.applicationId}/${token}`;
+  
+  const payload: any = {
+    content,
+  };
+  
+  if (embeds) {
+    payload.embeds = embeds;
+  }
+  
+  try {
+    const response = await fetch(webhook_url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
   } catch (error) {
-    logger.userAction(interaction.user.id, commandName, 'ERROR', error);
-    const errorMessage = error instanceof Error ? error.message : '不明なエラーが発生しました。';
-    
-    if (interaction.deferred) {
-      await interaction.editReply(`❌ エラー: ${errorMessage}`);
-    } else {
-      await interaction.reply(`❌ エラー: ${errorMessage}`);
-    }
+    logger.error('Followup message送信エラー:', error);
   }
-});
+}
 
 // サーバーステータス取得
 async function getServerStatus() {
@@ -125,17 +217,17 @@ function createStatusEmbed(status: any) {
     ? `🟢 監視中 (アイドル: ${status.monitoring.idleTimeMinutes}分)`
     : '🔴 停止中';
 
-  return new EmbedBuilder()
-    .setTitle('🖥️ サーバーステータス')
-    .addFields(
+  return {
+    title: '🖥️ サーバーステータス',
+    fields: [
       {
         name: '☁️ GCPインスタンス',
-        value: `ステータス: ${status.gcp.status}${status.gcp.uptime ? `\\n起動時間: ${Math.floor(status.gcp.uptime / 60)}分` : ''}`,
+        value: `ステータス: ${status.gcp.status}${status.gcp.uptime ? `\n起動時間: ${Math.floor(status.gcp.uptime / 60)}分` : ''}`,
         inline: true,
       },
       {
         name: '⛏️ Minecraftサーバー',
-        value: `オンライン: ${status.minecraft.isOnline ? '✅' : '❌'}\\nプレイヤー数: ${status.minecraft.playerCount}${status.minecraft.uptime ? `\\n起動時間: ${Math.floor(status.minecraft.uptime / 60)}分` : ''}`,
+        value: `オンライン: ${status.minecraft.isOnline ? '✅' : '❌'}\nプレイヤー数: ${status.minecraft.playerCount}${status.minecraft.uptime ? `\n起動時間: ${Math.floor(status.minecraft.uptime / 60)}分` : ''}`,
         inline: true,
       },
       {
@@ -148,9 +240,47 @@ function createStatusEmbed(status: any) {
         value: status.minecraft.players.length > 0 ? status.minecraft.players.join(', ') : 'なし',
         inline: false,
       }
-    )
-    .setTimestamp()
-    .setColor(status.minecraft.isOnline ? 0x00ff00 : 0xff0000);
+    ],
+    timestamp: new Date().toISOString(),
+    color: status.minecraft.isOnline ? 0x00ff00 : 0xff0000,
+  };
+}
+
+// ヘルプ表示用のEmbed作成
+function createHelpEmbed() {
+  return {
+    title: '📖 Craftoto Bot - 使い方',
+    description: 'Minecraft サーバー管理用のDiscord Botです',
+    fields: [
+      {
+        name: '🚀 `/craftoto up`',
+        value: 'GCPインスタンスを起動します',
+        inline: false,
+      },
+      {
+        name: '🛑 `/craftoto down`',
+        value: 'ワールドを保存してGCPインスタンスをシャットダウンします',
+        inline: false,
+      },
+      {
+        name: '📊 `/craftoto status`',
+        value: 'サーバーの状態を確認します（GCP・Minecraft・監視状況）',
+        inline: false,
+      },
+      {
+        name: '❓ `/craftoto help`',
+        value: 'この使い方を表示します',
+        inline: false,
+      },
+      {
+        name: '🔧 機能',
+        value: '• 自動プレイヤー監視\n• アイドル時間による自動シャットダウン\n• リアルタイムステータス表示\n• 安全なワールド保存',
+        inline: false,
+      }
+    ],
+    timestamp: new Date().toISOString(),
+    color: 0x5865f2, // Discord blue
+  };
 }
 
 // エラーハンドリング
@@ -163,5 +293,8 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
-// Botを起動
-client.login(config.discord.token);
+// サーバー起動
+app.listen(PORT, () => {
+  logger.info(`Server running on port ${PORT}`);
+  logger.info('Discord Interactions Webhook server started');
+});

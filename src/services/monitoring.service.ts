@@ -234,4 +234,63 @@ export class MonitoringService {
     this.shutdownInProgress = false;
     logger.monitoring('シャットダウン進行状況をリセットしました');
   }
+
+  /**
+   * Cloud Scheduler用：一回限りの監視チェックを実行
+   */
+  async checkAndShutdownIfIdle(): Promise<void> {
+    try {
+      // GCPインスタンスが実行中かどうかをチェック
+      const isInstanceRunning = await this.gcpService.isInstanceRunning();
+      
+      if (!isInstanceRunning) {
+        logger.debug('GCPインスタンスが停止中です。監視をスキップします。');
+        return;
+      }
+
+      // Minecraftサーバーの情報を取得
+      const serverInfo = await this.minecraftService.getServerInfo();
+      
+      if (!serverInfo.isOnline) {
+        logger.debug('Minecraftサーバーがオフラインです。監視をスキップします。');
+        return;
+      }
+
+      const currentTime = new Date();
+      
+      // プレイヤーがいる場合は最後の活動時刻を更新
+      if (serverInfo.playerCount > 0) {
+        this.lastPlayerActivity = currentTime;
+        logger.monitoring(`プレイヤー ${serverInfo.playerCount}人 オンライン`, {
+          players: serverInfo.players,
+          playerCount: serverInfo.playerCount
+        });
+        return;
+      }
+
+      // プレイヤーが0人の場合、アイドル時間をチェック
+      const idleTimeMinutes = (currentTime.getTime() - this.lastPlayerActivity.getTime()) / (1000 * 60);
+      
+      logger.monitoring(`プレイヤー 0人 - アイドル時間チェック`, {
+        idleMinutes: Math.floor(idleTimeMinutes),
+        maxIdleMinutes: this.idleTimeoutMinutes,
+        remainingMinutes: Math.ceil(this.idleTimeoutMinutes - idleTimeMinutes)
+      });
+
+      // アイドルタイムアウトに達した場合の処理
+      if (idleTimeMinutes >= this.idleTimeoutMinutes) {
+        await this.handleIdleTimeout();
+      } else {
+        // 警告メッセージの送信（残り時間が5分以下の場合）
+        const remainingMinutes = this.idleTimeoutMinutes - idleTimeMinutes;
+        if (remainingMinutes <= 5 && remainingMinutes > 0) {
+          const remainingTime = Math.ceil(remainingMinutes);
+          await this.sendWarningMessage(remainingTime);
+        }
+      }
+    } catch (error) {
+      logger.error('監視チェックエラー:', error);
+      throw error; // Cloud Schedulerにエラーを通知
+    }
+  }
 }

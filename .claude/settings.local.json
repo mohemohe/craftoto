@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:discord.com)",
+      "mcp__awslabs_aws-documentation-mcp-server__search_documentation"
+    ],
+    "deny": []
+  }
+}

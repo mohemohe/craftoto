@@ -7,6 +7,8 @@ export function loadConfig(): Config {
   const requiredEnvVars = [
     'DISCORD_TOKEN',
     'GUILD_ID',
+    'DISCORD_PUBLIC_KEY',
+    'DISCORD_APPLICATION_ID',
     'GCP_PROJECT_ID',
     'GCP_ZONE',
     'GCP_INSTANCE_NAME',
@@ -25,6 +27,8 @@ export function loadConfig(): Config {
     discord: {
       token: process.env.DISCORD_TOKEN!,
       guildId: process.env.GUILD_ID!,
+      publicKey: process.env.DISCORD_PUBLIC_KEY!,
+      applicationId: process.env.DISCORD_APPLICATION_ID!,
     },
     gcp: {
       projectId: process.env.GCP_PROJECT_ID!,

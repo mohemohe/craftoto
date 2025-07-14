@@ -1,0 +1,68 @@
+services:
+  craftoto:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: craftoto-bot
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Tokyo
+    
+    # Environment file
+    env_file:
+      - .env
+    
+    # Volumes for GCP credentials and logs
+    volumes:
+      # Mount GCP service account key (adjust path as needed)
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials.json}:/app/credentials.json:ro
+      # Optional: Mount logs directory
+      - ./logs:/app/logs
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('Health check')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Network mode (optional, for debugging)
+    # ports:
+    #   - "3000:3000"
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Read-only root filesystem (with exceptions)
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=100m
+    
+    # Labels for management
+    labels:
+      - "com.craftoto.description=Minecraft Server Manager Discord Bot"
+      - "com.craftoto.version=1.0.0"
+      - "com.craftoto.maintainer=mohemohe"
